@@ -1,0 +1,47 @@
+{
+    "$schema": "https://schemas.wp.org/trunk/block.json",
+    "apiVersion": 3,
+    "name": "w0/wp-org-portfolio",
+    "version": "0.1.0",
+    "title": "WP.org Portfolio",
+    "category": "widgets",
+    "icon": "admin-plugins",
+    "description": "Showcase any WordPress.org developer's complete portfolio of plugins and themes with live data, interactive filtering, and lightning-fast caching.",
+    "example": [],
+    "attributes": {
+        "username": {
+            "type": "string",
+            "default": ""
+        },
+        "showType": {
+            "type": "string",
+            "default": "plugins"
+        },
+        "pluginsPage": {
+            "type": "integer",
+            "default": 1
+        },
+        "themesPage": {
+            "type": "integer",
+            "default": 1
+        },
+        "perPage": {
+            "type": "integer",
+            "default": 10
+        },
+        "align": {
+            "type": "string",
+            "default": "wide"
+        }
+    },
+    "supports": {
+        "html": false,
+        "align": true
+    },
+    "textdomain": "wp-org-portfolio-block-wp",
+    "editorScript": "file:./index.js",
+    "editorStyle": "file:./index.css",
+    "style": "file:./style-index.css",
+    "viewScript": "file:./view.js",
+    "render": "file:./render.php"
+}

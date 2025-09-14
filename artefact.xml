@@ -1,0 +1,1081 @@
+<?xml version="1.0"?><artefact name="WP.org Portfolio" slug="wp-org-portfolio" type="code-package">
+  <file name="readme.txt">
+    <description>This file contains the readme information for the block. It is used to provide information about the block, its usage, and any other relevant details.</description>
+    <content><![CDATA[
+=== WP.org Portfolio ===
+Contributors:      w0-block-author
+Tags:              block
+Stable tag:        0.1.0
+License:           GPL-2.0-or-later
+
+Showcase any WordPress.org developer's complete portfolio of plugins and themes with live data, interactive filtering, and lightning-fast caching.
+
+== Description ==
+
+Showcase any WordPress.org developer's complete portfolio of plugins and themes with live data, interactive filtering, and lightning-fast caching.
+
+== Installation ==
+
+1. Upload the plugin files to the `/wp-content/plugins/wp-org-portfolio` directory, or install through WordPress directly.
+2. Activate the plugin through the 'Plugins' screen in WordPress.
+3. Insert the "WP.org Portfolio" block in the editor and enter a WordPress.org username.
+
+== Frequently Asked Questions ==
+
+= Does it cache WordPress.org API requests? =
+Yes, it caches plugin and theme lists for 12 hours using WordPress transients.
+
+= Can I change the username on the front end? =
+You can enable live refresh in the block’s Inspector settings, and users can click "Refresh" to update the results.
+
+== Screenshots ==
+
+1. The block in the editor showing plugins and themes for a specified username.
+2. The block frontend showing the refresh action and live results.
+
+== Changelog ==
+
+= 0.1.0 =
+* Initial release
+
+== Arbitrary section ==
+
+This block is ideal for plugin and theme authors who want to showcase their public work from WordPress.org on their personal or client sites.
+]]></content>
+  </file>
+  <file name="wp-org-portfolio.php">
+    <description>This file contains the block registration code in the form of a single block plugin. Any other plugin related functionality should be added to this file. All block rendering functionality should go to the `render.php` file.</description>
+    <content><![CDATA[<?php
+/**
+ * Plugin Name:       WP.org Portfolio
+ * Description:       Display all plugins and themes from a WordPress.org username
+ * Version:           0.1.0
+ * Author:            Your Name
+ * License:           GPL-2.0-or-later
+ * Text Domain:       wp-org-portfolio
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
+/**
+ * Register REST API endpoints
+ */
+function wporg_author_showcase_register_rest_routes() {
+	register_rest_route(
+		'wporg-showcase/v1',
+		'/author/(?P<username>[a-zA-Z0-9_-]+)',
+		array(
+			'methods'             => 'GET',
+			'callback'            => 'wporg_author_showcase_get_author_data',
+			'permission_callback' => '__return_true',
+			'args'                => array(
+				'username' => array(
+					'required' => true,
+					'type'     => 'string',
+				),
+				'refresh' => array(
+					'required' => false,
+					'type'     => 'bool',
+				),
+			),
+		)
+	);
+}
+add_action( 'rest_api_init', 'wporg_author_showcase_register_rest_routes' );
+
+/**
+ * Robust logging helper.
+ */
+if ( ! function_exists('was_author_showcase_log')) {
+	function was_author_showcase_log( $msg ) {
+		if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			@error_log( '[WP.org Showcase LOG] ' . print_r( $msg, true ) );
+		}
+	}
+}
+
+/**
+ * Get author plugins and themes data, with intensive logging
+ */
+function wporg_author_showcase_get_author_data( WP_REST_Request $request ) {
+	$username = sanitize_text_field( $request->get_param( 'username' ) );
+	$username_lc = strtolower( $username );
+	$refresh = $request->get_param( 'refresh' );
+	if ( empty( $username_lc ) ) {
+		return new WP_Error( 'no_username', 'Username is required', array( 'status' => 400 ) );
+	}
+
+	$cache_key = 'wporg_showcase_' . md5( $username_lc );
+	if ( ! $refresh ) {
+		$cached = get_transient( $cache_key );
+		if ( $cached !== false && is_array($cached) && isset($cached['username']) && strtolower($cached['username']) === $username_lc ) {
+			was_author_showcase_log( '[REST] Returning cached data for ' . $username_lc );
+			return rest_ensure_response( $cached );
+		}
+	} else {
+		delete_transient( $cache_key );
+	}
+
+	// Fetch plugins
+	$plugins_url = add_query_arg( array(
+		'action' => 'query_plugins',
+		'author' => $username_lc,
+		'per_page' => 50,
+	), 'https://api.wordpress.org/plugins/info/1.2/' );
+	// Fetch themes
+	$themes_url = add_query_arg( array(
+		'action' => 'query_themes',
+		'author' => $username_lc,
+		'per_page' => 50,
+	), 'https://api.wordpress.org/themes/info/1.2/' );
+
+	was_author_showcase_log( '[REST] Plugin API url: ' . $plugins_url );
+	was_author_showcase_log( '[REST] Theme API url: ' . $themes_url );
+
+	$plugins_response = wp_remote_get( $plugins_url, array( 'timeout' => 15 ) );
+	$themes_response = wp_remote_get( $themes_url, array( 'timeout' => 15 ) );
+
+	// LOG: Dump raw API response bodies and parsed JSON
+	was_author_showcase_log( '[REST] raw plugin API body: ' . wp_remote_retrieve_body( $plugins_response ) );
+	was_author_showcase_log( '[REST] raw theme API body: ' . wp_remote_retrieve_body( $themes_response ) );
+
+	$data = array(
+		'plugins' => array(),
+		'themes'  => array(),
+		'username' => $username_lc,
+	);
+
+	// Process plugins response
+	if ( ! is_wp_error( $plugins_response ) && wp_remote_retrieve_response_code( $plugins_response ) === 200 ) {
+		$plugins_body = wp_remote_retrieve_body( $plugins_response );
+		$plugins_data = json_decode( $plugins_body, true );
+		was_author_showcase_log( '[REST] plugin API parsed json: ' . print_r( $plugins_data, true ) );
+		if ( isset( $plugins_data['plugins'] ) && is_array($plugins_data['plugins']) ) {
+			$data['plugins'] = $plugins_data['plugins'];
+		}
+	}
+
+	// Process themes response
+	if ( ! is_wp_error( $themes_response ) && wp_remote_retrieve_response_code( $themes_response ) === 200 ) {
+		$themes_body = wp_remote_retrieve_body( $themes_response );
+		$themes_data = json_decode( $themes_body, true );
+		was_author_showcase_log( '[REST] theme API parsed json: ' . print_r( $themes_data, true ) );
+		if ( isset( $themes_data['themes'] ) && is_array($themes_data['themes']) ) {
+			$data['themes'] = $themes_data['themes'];
+		}
+	}
+
+	// If absolutely nothing is found, return empty arrays
+	if ( empty($data['plugins']) && empty($data['themes']) ) {
+		$data['plugins'] = array();
+		$data['themes'] = array();
+	}
+	$data['username'] = $username_lc;
+
+	was_author_showcase_log( '[REST] final REST return for ' . $username_lc . ': ' . print_r( $data, true ) );
+
+	// Cache for 12 hours ONLY if not forced refresh
+	if ( ! $refresh ) {
+		set_transient( $cache_key, $data, 12 * HOUR_IN_SECONDS );
+	}
+
+	return rest_ensure_response( $data );
+}
+
+/**
+ * Registers the block (with render-callback from render.php)
+ */
+function w0_wp_org_portfolio_block_init() {
+	$render_path = __DIR__ . '/build/render.php';
+	if ( file_exists( $render_path ) ) {
+		require_once $render_path;
+	}
+	register_block_type( __DIR__ . '/build', array(
+		'render_callback' => 'wporg_author_showcase_render_block',
+	));
+}
+add_action( 'init', 'w0_wp_org_portfolio_block_init' );]]></content>
+  </file>
+  <file name="block.json">
+    <description>This file contains metadata about the block including its name, title, category, icon, and other properties.</description>
+    <content><![CDATA[{
+    "$schema": "https://schemas.wp.org/trunk/block.json",
+    "apiVersion": 3,
+    "name": "w0/wp-org-portfolio",
+    "version": "0.1.0",
+    "title": "WP.org Portfolio",
+    "category": "widgets",
+    "icon": "admin-plugins",
+    "description": "Showcase any WordPress.org developer's complete portfolio of plugins and themes with live data, interactive filtering, and lightning-fast caching.",
+    "example": [],
+    "attributes": {
+        "username": {
+            "type": "string",
+            "default": ""
+        },
+        "showType": {
+            "type": "string",
+            "default": "plugins"
+        },
+        "pluginsPage": {
+            "type": "integer",
+            "default": 1
+        },
+        "themesPage": {
+            "type": "integer",
+            "default": 1
+        },
+        "perPage": {
+            "type": "integer",
+            "default": 10
+        },
+        "align": {
+            "type": "string",
+            "default": "wide"
+        }
+    },
+    "supports": {
+        "html": false,
+        "align": true
+    },
+    "textdomain": "wp-org-portfolio-block-wp",
+    "editorScript": "file:./index.js",
+    "editorStyle": "file:./index.css",
+    "style": "file:./style-index.css",
+    "viewScript": "file:./view.js",
+    "render": "file:./render.php"
+}]]></content>
+  </file>
+  <file name="index.js">
+    <description>This file registers the block, specifies the edit and save functions, and loads the block's metadata</description>
+    <content><![CDATA[import { registerBlockType } from '@wordpress/blocks';
+import { __ } from '@wordpress/i18n';
+import { useBlockProps } from '@wordpress/block-editor';
+import Edit from './edit';
+import metadata from './block.json';
+
+registerBlockType(metadata.name, {
+	edit: Edit,
+});
+]]></content>
+  </file>
+  <file name="edit.js">
+    <description>This file contains the edit function for the block which is responsible for rendering the block in the editor.</description>
+    <content><![CDATA[import { __ } from '@wordpress/i18n';
+import { useEffect, useState } from '@wordpress/element';
+import { useBlockProps, InspectorControls, BlockControls, AlignmentControl } from '@wordpress/block-editor';
+import { PanelBody, TextControl, SelectControl, Spinner, Notice, Button as WPButton, Panel } from '@wordpress/components';
+import './editor.scss';
+
+function decodeAllEntities(str) {
+	if (!str) return '';
+	let prev = null, curr = str;
+	const textarea = document.createElement('textarea');
+	for (let i = 0; i < 6; i++) {
+		textarea.innerHTML = curr;
+		curr = textarea.value;
+		if (curr === prev) break;
+		prev = curr;
+	}
+	curr = curr.replace(/&[#A-Za-z0-9]+;/g, '');
+	curr = curr.replace(/[\u2010-\u2015\u2212\u2012]/g, '-');
+	return curr;
+}
+
+function renderStars(avg) {
+	if (!avg || isNaN(avg)) return null;
+	const stars = [];
+	const round = Math.round(avg * 2) / 2;
+	for (let i = 1; i <= 5; i++) {
+		if (round >= i) stars.push('★');
+		else if (round >= i - 0.5) stars.push('☆');
+		else stars.push('☆');
+	}
+	return (
+		<span
+			style={{ color: '#ffc844', fontSize: '1.08rem', letterSpacing: '0.05em', marginRight: 6 }}
+			aria-label={__('Star rating', 'wp-org-portfolio-block-wp')}
+		>
+			{stars.join('')}
+		</span>
+	);
+}
+
+function PoweredByTelexPanel() {
+	return (
+		<PanelBody title={__('Powered by Telex', 'wp-org-portfolio-block-wp')} initialOpen={true}>
+			<p>Telex is basically the J.A.R.V.I.S of WordPress development - an AI that builds blocks so you don't have to.</p>
+			<p style={{marginTop: 6}}>
+				<a
+					href="https://telex.automattic.ai"
+					target="_blank"
+					rel="noopener noreferrer"
+				>
+					Learn more about Telex
+				</a>
+			</p>
+		</PanelBody>
+	);
+}
+
+export default function Edit({ attributes, setAttributes }) {
+	const { username, showType = 'plugins', perPage = 10, align, loadedCount } = attributes;
+	const [loading, setLoading] = useState(false);
+	const [plugins, setPlugins] = useState([]);
+	const [themes, setThemes] = useState([]);
+	const [error, setError] = useState('');
+
+	const fetchData = async (name) => {
+		if (!name) {
+			setPlugins([]);
+			setThemes([]);
+			setError('');
+			return;
+		}
+		setLoading(true);
+		setError('');
+		try {
+			const res = await wp.apiFetch({
+				path: `/wporg-showcase/v1/author/${encodeURIComponent(name)}`,
+			});
+			let pluginsArr = res.plugins || [];
+			let themesArr = res.themes || [];
+			if (!Array.isArray(pluginsArr)) pluginsArr = [];
+			if (!Array.isArray(themesArr)) themesArr = [];
+			setPlugins(pluginsArr);
+			setThemes(themesArr);
+			if (pluginsArr.length === 0 && themesArr.length === 0) {
+				setError(__('No results found for this username.', 'wp-org-portfolio-block-wp'));
+			} else {
+				setError('');
+			}
+		} catch (e) {
+			setError(__('Failed to fetch data.', 'wp-org-portfolio-block-wp'));
+			setPlugins([]);
+			setThemes([]);
+		}
+		setLoading(false);
+	};
+
+	useEffect(() => {
+		if (username) {
+			fetchData(username);
+			setAttributes({ ...attributes, loadedCount: undefined });
+		} else {
+			setPlugins([]);
+			setThemes([]);
+			setError('');
+		}
+	// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [username]);
+
+	const blockProps = useBlockProps({
+		className: align ? `align${align}` : undefined
+	});
+
+	function handleLoadMore(type, totalCount) {
+		const curr = Number(loadedCount) || perPage;
+		const newCount = Math.min(curr + perPage, totalCount);
+		setAttributes({ ...attributes, loadedCount: newCount });
+	}
+
+	function renderPlugins() {
+		if (!plugins.length) return <div>{__('No plugins found.', 'wp-org-portfolio-block-wp')}</div>;
+		const toShow = Number(loadedCount) || perPage;
+		const showPlugins = plugins.slice(0, toShow);
+		return (
+			<div className="was-grid">
+			{showPlugins.map((plugin) => {
+				const iconUrl = plugin.icons && plugin.icons['1x']
+					? plugin.icons['1x']
+					: plugin.icons && plugin.icons['default']
+						? plugin.icons['default']
+						: '';
+				const rating = plugin.rating && plugin.num_ratings ? Number(plugin.rating) : null;
+				const avgRating = rating ? (rating / 20) : null;
+				const name = decodeAllEntities(plugin.name);
+				const desc = decodeAllEntities(plugin.short_description);
+				const learnMoreUrl = `https://wordpress.org/plugins/${plugin.slug}/`;
+				return (
+					<div key={plugin.slug} className="was-card">
+						{iconUrl && <img src={iconUrl} alt={name} />}
+						<div className="was-card-content">
+							<a href={learnMoreUrl} target="_blank" rel="noopener noreferrer">{name}</a>
+							{avgRating && (
+								<div className="was-rating">
+									{renderStars(avgRating)}
+									<span className="was-rating-numeric">{avgRating.toFixed(1)} / 5</span>
+									<span className="was-num-ratings">({plugin.num_ratings} ratings)</span>
+								</div>
+							)}
+							{desc && <p>{desc}</p>}
+							{plugin.active_installs && (
+								<div className="was-meta">{plugin.active_installs.toLocaleString()}+ installs</div>
+							)}
+							<WPButton
+								onClick={() => window.open(learnMoreUrl, '_blank')}
+								className="was-learn-more"
+								tabIndex={0}
+							>
+								{__('Learn more', 'wp-org-portfolio-block-wp')}
+							</WPButton>
+						</div>
+					</div>
+				);
+			})}
+			{showPlugins.length < plugins.length && (
+				<div style={{ display: 'flex', justifyContent: 'center' }}>
+					<WPButton
+						className="was-load-more-btn"
+						style={{ margin: '0 0 8px 0', padding: '5px 20px', fontSize: '1em', borderRadius: 4, background: '#f3f3f6', border: '1px solid #bbb', color: '#222', cursor: 'pointer' }}
+						onClick={() => handleLoadMore('plugins', plugins.length)}
+					>
+						{__('Load more', 'wp-org-portfolio-block-wp')}
+					</WPButton>
+				</div>
+			)}
+			</div>
+		);
+	}
+
+	function renderThemes() {
+		if (!themes.length) return <div>{__('No themes found.', 'wp-org-portfolio-block-wp')}</div>;
+		const toShow = Number(loadedCount) || perPage;
+		const showThemes = themes.slice(0, toShow);
+		return (
+			<div className="was-grid">
+			{showThemes.map((theme) => {
+				const screenshot = theme.screenshot_url || '';
+				const name = decodeAllEntities(theme.name);
+				let desc = decodeAllEntities(theme.description);
+				if (desc && desc.length > 100) desc = desc.substring(0, 100) + '...';
+				const learnMoreUrl = `https://wordpress.org/themes/${theme.slug}/`;
+				return (
+					<div key={theme.slug} className="was-card">
+						{screenshot && <img src={screenshot} alt={name} />}
+						<div className="was-card-content">
+							<a href={learnMoreUrl} target="_blank" rel="noopener noreferrer">{name}</a>
+							{desc && <p>{desc}</p>}
+							<WPButton
+								onClick={() => window.open(learnMoreUrl, '_blank')}
+								className="was-learn-more"
+								tabIndex={0}
+							>
+								{__('Learn more', 'wp-org-portfolio-block-wp')}
+							</WPButton>
+						</div>
+					</div>
+				);
+			})}
+			{showThemes.length < themes.length && (
+				<div style={{ display: 'flex', justifyContent: 'center' }}>
+					<WPButton
+						className="was-load-more-btn"
+						style={{ margin: '0 0 8px 0', padding: '5px 20px', fontSize: '1em', borderRadius: 4, background: '#f3f3f6', border: '1px solid #bbb', color: '#222', cursor: 'pointer' }}
+						onClick={() => handleLoadMore('themes', themes.length)}
+					>
+						{__('Load more', 'wp-org-portfolio-block-wp')}
+					</WPButton>
+				</div>
+			)}
+			</div>
+		);
+	}
+
+	const renderContent = () => {
+		if (!username) {
+			return <div style={{ marginTop: '22px', fontSize: '1.08rem', color: '#4a4a4a', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', minHeight: '44px' }}>{__("Let's see what magic you've created! Add your WordPress.org username to get started.", 'wp-org-portfolio-block-wp')}</div>;
+		}
+		if (loading) {
+			return <Spinner />;
+		}
+		if (error) {
+			return <Notice status="error">{error}</Notice>;
+		}
+		return (
+			<div>
+				{showType === 'plugins' && (
+					<div>
+						<strong>{__('Plugins', 'wp-org-portfolio-block-wp')}</strong>
+						{renderPlugins()}
+					</div>
+				)}
+				{showType === 'themes' && (
+					<div>
+						<strong>{__('Themes', 'wp-org-portfolio-block-wp')}</strong>
+						{renderThemes()}
+					</div>
+				)}
+			</div>
+		);
+	};
+
+	return (
+		<div {...blockProps}>
+			<BlockControls>
+				<AlignmentControl
+					value={align}
+					onChange={(newAlign) => setAttributes({ align: newAlign })}
+				/>
+			</BlockControls>
+			<InspectorControls>
+				<PanelBody title={__('WP.org Author Settings', 'wp-org-portfolio-block-wp')} initialOpen={true}>
+					<TextControl
+						label={__('Username', 'wp-org-portfolio-block-wp')}
+						value={username}
+						onChange={(v) => setAttributes({ username: v, loadedCount: undefined })}
+						placeholder={__('e.g. automattic', 'wp-org-portfolio-block-wp')}
+					/>
+					<SelectControl
+						label={__('Show', 'wp-org-portfolio-block-wp')}
+						value={showType}
+						options={[
+							{ label: __('Plugins', 'wp-org-portfolio-block-wp'), value: 'plugins' },
+							{ label: __('Themes', 'wp-org-portfolio-block-wp'), value: 'themes' }
+						]}
+						onChange={(v) => setAttributes({ showType: v, loadedCount: undefined })}
+					/>
+					<TextControl
+						label={__('Items per click', 'wp-org-portfolio-block-wp')}
+						type='number'
+						min='1'
+						max='50'
+						value={perPage}
+						onChange={(v) => setAttributes({ perPage: Math.max(1, Math.min(50, parseInt(v) || 1)), loadedCount: undefined })}
+					/>
+				</PanelBody>
+				<PoweredByTelexPanel />
+			</InspectorControls>
+			<div>
+				{renderContent()}
+			</div>
+		</div>
+	);
+}
+]]></content>
+  </file>
+  <file name="save.js">
+    <description>This file contains the save function for the block which is responsible for creating the static result of rendering the block on the client to display the saved result on the front end.</description>
+    <content><![CDATA[
+  // Dynamic Block: save.js is not used.
+	]]></content>
+  </file>
+  <file name="style.scss">
+    <description>This file contains styles for the block in the front end.</description>
+    <content><![CDATA[.wp-block-w0-wp-org-portfolio .was-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 32px 24px;
+  margin: 32px 0;
+}
+.wp-block-w0-wp-org-portfolio.alignwide .was-grid,
+.wp-block-w0-wp-org-portfolio.alignfull .was-grid {
+  grid-template-columns: repeat(2, 1fr);
+}
+.wp-block-w0-wp-org-portfolio .was-card {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  background: #fff;
+  border: 1px solid #dcdcde;
+  border-radius: 8px;
+  padding: 20px 22px;
+  transition: border 0.15s;
+  min-height: 112px;
+  position: relative;
+  overflow: hidden;
+}
+.wp-block-w0-wp-org-portfolio .was-card:hover {
+  border-color: #b8bccc;
+}
+.wp-block-w0-wp-org-portfolio .was-card img {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 4px;
+  object-fit: contain;
+  background: #f6f7f8;
+  margin-right: 20px;
+  margin-bottom: 0;
+  margin-top: 0;
+}
+.wp-block-w0-wp-org-portfolio .was-card > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: relative;
+}
+.wp-block-w0-wp-org-portfolio .was-card a {
+  font-size: 1.08rem;
+  font-weight: 600;
+  color: #1e1e1e;
+  text-decoration: none;
+  margin-bottom: 4px;
+  transition: color 0.14s;
+  word-break: break-word;
+  line-height: 1.27;
+}
+.wp-block-w0-wp-org-portfolio .was-card a:hover {
+  color: #2271b1;
+  text-decoration: underline;
+}
+.wp-block-w0-wp-org-portfolio .was-card p {
+  color: #41484c;
+  font-size: 1em;
+  margin: 6px 0 0 0;
+  line-height: 1.5;
+  overflow: hidden;
+}
+.wp-block-w0-wp-org-portfolio .was-card .was-meta {
+  font-size: 0.98em;
+  color: #767676;
+  margin-top: 9px;
+}
+.wp-block-w0-wp-org-portfolio .was-card .was-learn-more {
+  align-self: flex-end;
+  margin-top: auto;
+  font-size: 0.98rem;
+  color: #2271b1;
+  background: none;
+  border: none;
+  box-shadow: none;
+  text-decoration: underline;
+  font-weight: 500;
+  padding: 5px 20px;
+  z-index: 10;
+  position: absolute;
+  right: 22px;
+  bottom: 20px;
+  cursor: pointer;
+}
+.wp-block-w0-wp-org-portfolio .was-card .was-learn-more:hover {
+  color: #145486;
+  text-decoration: underline;
+}
+.wp-block-w0-wp-org-portfolio strong {
+  display: inline-block;
+  font-size: 1.14rem;
+  color: #222;
+  margin: 16px 0 8px 2px;
+}
+@media (max-width: 820px) {
+  .wp-block-w0-wp-org-portfolio .was-grid,
+  .wp-block-w0-wp-org-portfolio.alignwide .was-grid,
+  .wp-block-w0-wp-org-portfolio.alignfull .was-grid {
+    grid-template-columns: 1fr;
+    gap: 18px 0;
+  }
+  .wp-block-w0-wp-org-portfolio .was-card {
+    max-width: 100%;
+    padding: 18px 10px;
+  }
+  .wp-block-w0-wp-org-portfolio strong {
+    margin-left: 0;
+  }
+  .wp-block-w0-wp-org-portfolio .was-card .was-learn-more {
+    right: 10px;
+    bottom: 10px;
+  }
+}
+]]></content>
+  </file>
+  <file name="editor.scss">
+    <description>This file contains styles for the block in the editor.</description>
+    <content><![CDATA[.wp-block-w0-wp-org-portfolio .was-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 32px 24px;
+  margin: 32px 0;
+}
+.wp-block-w0-wp-org-portfolio.alignwide .was-grid,
+.wp-block-w0-wp-org-portfolio.alignfull .was-grid {
+  grid-template-columns: repeat(2, 1fr);
+}
+.wp-block-w0-wp-org-portfolio .was-card {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  background: #fff;
+  border: 1px solid #dcdcde;
+  border-radius: 8px;
+  padding: 20px 22px;
+  transition: border 0.15s;
+  min-height: 112px;
+  position: relative;
+  overflow: hidden;
+}
+.wp-block-w0-wp-org-portfolio .was-card:hover {
+  border-color: #b8bccc;
+}
+.wp-block-w0-wp-org-portfolio .was-card img {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 4px;
+  object-fit: contain;
+  background: #f6f7f8;
+  margin-right: 20px;
+  margin-bottom: 0;
+  margin-top: 0;
+}
+.wp-block-w0-wp-org-portfolio .was-card > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: relative;
+}
+.wp-block-w0-wp-org-portfolio .was-card a {
+  font-size: 1.08rem;
+  font-weight: 600;
+  color: #1e1e1e;
+  text-decoration: none;
+  margin-bottom: 4px;
+  transition: color 0.14s;
+  word-break: break-word;
+  line-height: 1.27;
+}
+.wp-block-w0-wp-org-portfolio .was-card a:hover {
+  color: #2271b1;
+  text-decoration: underline;
+}
+.wp-block-w0-wp-org-portfolio .was-card p {
+  color: #41484c;
+  font-size: 1em;
+  margin: 6px 0 0 0;
+  line-height: 1.5;
+  overflow: hidden;
+}
+.wp-block-w0-wp-org-portfolio .was-card .was-meta {
+  font-size: 0.98em;
+  color: #767676;
+  margin-top: 9px;
+}
+.wp-block-w0-wp-org-portfolio .was-card .was-learn-more {
+  align-self: flex-end;
+  margin-top: auto;
+  font-size: 0.98rem;
+  color: #2271b1;
+  background: none;
+  border: none;
+  box-shadow: none;
+  text-decoration: underline;
+  font-weight: 500;
+  padding: 5px 20px;
+  z-index: 10;
+  position: absolute;
+  right: 22px;
+  bottom: 20px;
+  cursor: pointer;
+}
+.wp-block-w0-wp-org-portfolio .was-card .was-learn-more:hover {
+  color: #145486;
+  text-decoration: underline;
+}
+.wp-block-w0-wp-org-portfolio strong {
+  display: inline-block;
+  font-size: 1.14rem;
+  color: #222;
+  margin: 16px 0 8px 2px;
+}
+@media (max-width: 820px) {
+  .wp-block-w0-wp-org-portfolio .was-grid,
+  .wp-block-w0-wp-org-portfolio.alignwide .was-grid,
+  .wp-block-w0-wp-org-portfolio.alignfull .was-grid {
+    grid-template-columns: 1fr;
+    gap: 18px 0;
+  }
+  .wp-block-w0-wp-org-portfolio .was-card {
+    max-width: 100%;
+    padding: 18px 10px;
+  }
+  .wp-block-w0-wp-org-portfolio strong {
+    margin-left: 0;
+  }
+  .wp-block-w0-wp-org-portfolio .was-card .was-learn-more {
+    right: 10px;
+    bottom: 10px;
+  }
+}
+]]></content>
+  </file>
+  <file name="view.js">
+    <description>This file contains the view function for the block which is responsible for rendering interactive behaviors of the block on the front end. Ideally using the WordPress interactivity API.</description>
+    <content><![CDATA["use strict";
+document.addEventListener('click', function(e) {
+	// Load More handling
+	const loadMoreBtn = e.target.closest('.wp-block-w0-wp-org-portfolio .was-load-more-btn');
+	if (loadMoreBtn) {
+		e.preventDefault();
+		const blockRoot = loadMoreBtn.closest('.wp-block-w0-wp-org-portfolio');
+		if (!blockRoot) return;
+		const username = blockRoot.getAttribute('data-username');
+		const showtype = blockRoot.getAttribute('data-showtype');
+		const perPage = parseInt(blockRoot.getAttribute('data-per-page'), 10) || 10;
+		const jsattr = loadMoreBtn.getAttribute('data-jsattr'); // 'plugins' or 'themes'
+		let currentCount = parseInt(blockRoot.getAttribute('data-loaded-count'), 10) || perPage;
+		const nextCount = currentCount + perPage;
+
+		fetch(`/wp-json/wporg-showcase/v1/author/${encodeURIComponent(username)}`)
+		.then(r => r.json())
+		.then(data => {
+			if (!data) return;
+			if (jsattr === 'plugins') {
+				const plugins = Array.isArray(data.plugins) ? data.plugins : [];
+				const toShow = plugins.slice(0, nextCount);
+				let html = '';
+				if (toShow.length) {
+					html = toShow.map((plugin) => {
+						const iconUrl = plugin.icons && plugin.icons['1x'] ? plugin.icons['1x'] : (plugin.icons && plugin.icons['default'] ? plugin.icons['default'] : '');
+						const avgRating = plugin.rating && plugin.num_ratings ? (Number(plugin.rating) / 20) : null;
+						const name = plugin.name;
+						const desc = plugin.short_description || '';
+						const learnMoreUrl = `https://wordpress.org/plugins/${plugin.slug}/`;
+						return `<div class='was-card' style='position:relative;'>${iconUrl ? `<img src='${iconUrl}' alt='${name}' />` : ''}<div style='flex:1;position:relative;min-height:80px;'><a href='${learnMoreUrl}' target='_blank' rel='noopener noreferrer' style='font-weight:bold;font-size:1.2rem;color:#262626;text-decoration:none;'>${name}</a>${avgRating ? `<div style='margin:0.2rem 0 0 0;display:flex;align-items:center;gap:8px;'><span style='color:#ffc844;font-size:1.08rem;letter-spacing:0.05em;'>${'★'.repeat(Math.floor(avgRating))}${'☆'.repeat(5 - Math.ceil(avgRating))}</span><span style='font-size:0.95rem;color:#6e6e6e;'>${avgRating.toFixed(1)} / 5</span><span style='font-size:0.93rem;color:#aaa;'>(${plugin.num_ratings} ratings)</span></div>` : ''}${desc ? `<p style='margin:0.5rem 0 0.25rem 0;font-size:0.98rem;color:#555;'>${desc}</p>` : ''}${plugin.active_installs ? `<div style='font-size:0.95rem;color:#999;margin-top:0.5rem;'>${plugin.active_installs.toLocaleString()}+ installs</div>` : ''}<a href='${learnMoreUrl}' target='_blank' rel='noopener noreferrer' class='was-learn-more' style='position:absolute;right:0;bottom:0;font-size:0.98rem;color:#2271b1;text-decoration:underline;font-weight:500;padding:2px 4px;z-index:10;'>Learn more</a></div></div>`;
+					}).join('');
+				} else {
+					html = `<div>No plugins found.</div>`;
+				}
+				const pluginsGrid = blockRoot.querySelector('.was-grid');
+				if (pluginsGrid) pluginsGrid.innerHTML = html;
+				if (toShow.length >= plugins.length) {
+					loadMoreBtn.remove();
+				} else {
+					blockRoot.setAttribute('data-loaded-count', nextCount);
+				}
+			}
+			if (jsattr === 'themes') {
+				const themes = Array.isArray(data.themes) ? data.themes : [];
+				const toShow = themes.slice(0, nextCount);
+				let html = '';
+				if (toShow.length) {
+					html = toShow.map((theme) => {
+						const screenshot = theme.screenshot_url || '';
+						const name = theme.name;
+						let desc = theme.description || '';
+						if (desc.length > 100) desc = desc.substring(0,100) + '...';
+						const learnMoreUrl = `https://wordpress.org/themes/${theme.slug}/`;
+						return `<div class='was-card' style='position:relative;'>${screenshot ? `<img src='${screenshot}' alt='${name}' />` : ''}<div style='flex:1;position:relative;min-height:80px;'><a href='${learnMoreUrl}' target='_blank' rel='noopener noreferrer' style='font-weight:bold;font-size:1.2rem;color:#262626;text-decoration:none;'>${name}</a>${desc ? `<p style='margin:0.5rem 0 0.25rem 0;font-size:0.98rem;color:#555;'>${desc}</p>` : ''}<a href='${learnMoreUrl}' target='_blank' rel='noopener noreferrer' class='was-learn-more' style='position:absolute;right:0;bottom:0;font-size:0.98rem;color:#2271b1;text-decoration:underline;font-weight:500;padding:2px 4px;z-index:10;'>Learn more</a></div></div>`;
+					}).join('');
+				} else {
+					html = `<div>No themes found.</div>`;
+				}
+				const themesGrid = blockRoot.querySelector('.was-grid');
+				if (themesGrid) themesGrid.innerHTML = html;
+				if (toShow.length >= themes.length) {
+					loadMoreBtn.remove();
+				} else {
+					blockRoot.setAttribute('data-loaded-count', nextCount);
+				}
+			}
+		});
+		return;
+	}
+});
+]]></content>
+  </file>
+  <file name="render.php">
+    <description>This file contains the render callback function for the block, which is responsible for rendering the block content on the front end. A render function should exist only if the block is dynamic.</description>
+    <content><![CDATA[<?php
+if ( ! function_exists( 'was_decode_all_entities' ) ) {
+	function was_decode_all_entities( $value ) {
+		if ( ! is_string( $value ) || $value === '' ) {
+			return '';
+		}
+		for ( $i = 0; $i < 12; $i++ ) {
+			$prev = $value;
+			$value = html_entity_decode( $value, ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+			$value = htmlspecialchars_decode( $value, ENT_QUOTES | ENT_HTML5 );
+			if ( $value === $prev ) {
+				break;
+			}
+		}
+		$value = preg_replace( '/&[#A-Za-z0-9]+;/', '', $value );
+		$value = preg_replace( '/[\x{2012}-\x{2015}\x{2212}\x{2010}-\x{2014}]/u', '-', $value );
+		return $value;
+	}
+}
+if ( ! function_exists( 'was_sanitize_output_text' ) ) {
+	function was_sanitize_output_text( $text ) {
+		$out = (string) $text;
+		try {
+			$out = was_decode_all_entities($out);
+		} catch (Exception $e) {
+			$out = $text;
+		}
+		$out = wp_strip_all_tags( $out );
+		$out = preg_replace('/&[a-zA-Z0-9#]+;/', '', $out );
+		return $out;
+	}
+}
+if ( ! function_exists( 'wporg_author_showcase_render_block' ) ) {
+function wporg_author_showcase_render_block( $attributes ) {
+	$username = isset( $attributes['username'] ) ? sanitize_text_field( $attributes['username'] ) : '';
+	$show_type = isset( $attributes['showType'] ) ? $attributes['showType'] : 'plugins';
+	$per_page = isset($attributes['perPage']) ? intval($attributes['perPage']) : 10;
+	$align = !empty($attributes['align']) ? ' align' . esc_attr($attributes['align']) : '';
+	$loaded_count = isset($attributes['loadedCount']) ? intval($attributes['loadedCount']) : $per_page;
+
+	if ( ! $username ) {
+		return '<div style="margin-top:22px;font-size:1.08rem;color:#4a4a4a">' . esc_html__( "Let's see what magic you've created! Add your WordPress.org username to get started.", 'wp-org-portfolio-block-wp' ) . '</div>';
+	}
+	$api_route = '/wporg-showcase/v1/author/' . rawurlencode( $username );
+	$request = new WP_REST_Request( 'GET', $api_route );
+	$response = rest_do_request( $request );
+	$data = $response->is_error() ? array() : $response->get_data();
+
+	$plugins = ! empty( $data['plugins'] ) && is_array( $data['plugins'] ) ? $data['plugins'] : array();
+	$themes  = ! empty( $data['themes'] ) && is_array( $data['themes'] ) ? $data['themes'] : array();
+
+	ob_start();
+	?>
+	<div class="wp-block-w0-wp-org-portfolio<?php echo $align; ?>" data-username="<?php echo esc_attr( $username ); ?>" data-showtype="<?php echo esc_attr( $show_type ); ?>" data-per-page="<?php echo esc_attr($per_page); ?>" data-loaded-count="<?php echo esc_attr($loaded_count); ?>">
+		<?php if ( $show_type === 'plugins' ) : ?>
+		<div>
+			<strong><?php esc_html_e( 'Plugins', 'wp-org-portfolio-block-wp' ); ?></strong>
+			<div class="was-grid">
+				<?php
+				$to_show = array_slice($plugins, 0, $loaded_count);
+				if ( ! empty( $to_show ) ) {
+					foreach ($to_show as $plugin ) : ?>
+					<div class="was-card" style="position:relative;">
+						<?php
+						$icon_url = '';
+						if ( ! empty( $plugin['icons']['1x'] ) ) {
+							$icon_url = $plugin['icons']['1x'];
+						} elseif ( ! empty( $plugin['icons']['default'] ) ) {
+							$icon_url = $plugin['icons']['default'];
+						}
+						if ( $icon_url ) {
+							echo '<img src="' . esc_url( $icon_url ) . '" alt="' . esc_attr( was_sanitize_output_text( $plugin['name'] ) ) . '" />';
+						}
+						?>
+						<div style="flex:1;position:relative;min-height:80px;">
+							<a href="<?php echo esc_url( 'https://wordpress.org/plugins/' . $plugin['slug'] . '/' ); ?>" target="_blank" rel="noopener noreferrer" style="font-weight:bold;font-size:1.2rem;color:#262626;text-decoration:none;">
+								<?php echo was_sanitize_output_text( $plugin['name'] ); ?>
+							</a>
+							<?php 
+							$rating = isset( $plugin['rating'] ) ? floatval( $plugin['rating'] ) : null;
+							$num_ratings = isset( $plugin['num_ratings'] ) ? intval( $plugin['num_ratings'] ) : null;
+							$avg_rating = ( $rating !== null && $num_ratings ) ? $rating / 20 : null;
+							if ( $avg_rating ) : ?>
+								<div style="margin:0.2rem 0 0 0;display:flex;align-items:center;gap:8px;">
+									<span style="color:#ffc844;font-size:1.08rem;letter-spacing:0.05em;" aria-label="<?php esc_attr_e('Star rating','wp-org-portfolio-block-wp'); ?>">
+									<?php
+									for ( $i = 1; $i <= 5; $i++ ) {
+										if ( $avg_rating >= $i ) {
+											echo '★';
+										} elseif ( $avg_rating >= ($i - 0.5) ) {
+											echo '☆';
+										} else {
+											echo '☆';
+										}
+									}
+									?>
+									</span>
+									<span style="font-size:0.95rem;color:#6e6e6e;">
+										<?php echo esc_html( number_format_i18n( $avg_rating, 1 ) ); ?> / 5
+									</span>
+									<span style="font-size:0.93rem;color:#aaa;">(<?php echo esc_html( $num_ratings ); ?> ratings)</span>
+								</div>
+							<?php endif; ?>
+							<?php if ( ! empty( $plugin['short_description'] ) ) : ?>
+								<p style="margin:0.5rem 0 0.25rem 0;font-size:0.98rem;color:#555;">
+									<?php echo was_sanitize_output_text( $plugin['short_description'] ); ?>
+								</p>
+							<?php endif; ?>
+							<?php if ( ! empty( $plugin['active_installs'] ) ) : ?>
+								<div style="font-size:0.95rem;color:#999;margin-top:0.5rem;">
+									<?php echo esc_html( number_format_i18n( $plugin['active_installs'] ) ) . '+'; ?> installs
+								</div>
+							<?php endif; ?>
+							<button onclick="window.open('<?php echo esc_url( 'https://wordpress.org/plugins/' . $plugin['slug'] . '/' ); ?>','_blank')" type="button" class="was-learn-more" style="position:absolute;right:22px;bottom:20px;font-size:0.98rem;color:#2271b1;text-decoration:underline;font-weight:500;padding:5px 20px;z-index:10;">
+								<?php esc_html_e('Learn more', 'wp-org-portfolio-block-wp'); ?>
+							</button>
+						</div>
+					</div>
+				<?php endforeach; } else {
+					echo '<div>' . esc_html__( 'No plugins found.', 'wp-org-portfolio-block-wp' ) . '</div>';
+				} ?>
+			</div>
+			<?php if ($loaded_count < count($plugins)) : ?>
+				<button class="was-load-more-btn" data-jsattr="plugins" style="margin:0 auto 8px auto;display:block;padding:5px 20px;font-size:1em;border-radius:4px;background:#f3f3f6;border:1px solid #bbb;color:#222;cursor:pointer;">
+					<?php esc_html_e('Load more', 'wp-org-portfolio-block-wp'); ?>
+				</button>
+			<?php endif; ?>
+		</div>
+		<?php endif; ?>
+		<?php if ( $show_type === 'themes' ) : ?>
+		<div>
+			<strong><?php esc_html_e( 'Themes', 'wp-org-portfolio-block-wp' ); ?></strong>
+			<div class="was-grid">
+				<?php
+				$to_show = array_slice($themes, 0, $loaded_count);
+				if ( ! empty( $to_show ) ) {
+					foreach ($to_show as $theme ) : ?>
+					<div class="was-card" style="position:relative;">
+						<?php if ( ! empty( $theme['screenshot_url'] ) ) : ?>
+							<img src="<?php echo esc_url( $theme['screenshot_url'] ); ?>" alt="<?php echo esc_attr( was_sanitize_output_text( $theme['name'] ) ); ?>" />
+						<?php endif; ?>
+						<div style="flex:1;position:relative;min-height:80px;">
+							<a href="<?php echo esc_url( 'https://wordpress.org/themes/' . $theme['slug'] . '/' ); ?>" target="_blank" rel="noopener noreferrer" style="font-weight:bold;font-size:1.2rem;color:#262626;text-decoration:none;">
+								<?php echo was_sanitize_output_text( $theme['name'] ); ?>
+							</a>
+							<?php if ( ! empty( $theme['description'] ) ) : ?>
+								<p style="margin:0.5rem 0 0.25rem 0;font-size:0.98rem;color:#555;">
+									<?php
+									$desc = (string) $theme['description'];
+									$desc = mb_strlen( $desc ) > 100 ? mb_substr( $desc, 0, 100 ) . '...' : $desc;
+									echo was_sanitize_output_text( $desc );
+								?>
+								</p>
+							<?php endif; ?>
+							<button onclick="window.open('<?php echo esc_url( 'https://wordpress.org/themes/' . $theme['slug'] . '/' ); ?>','_blank')" type="button" class="was-learn-more" style="position:absolute;right:22px;bottom:20px;font-size:0.98rem;color:#2271b1;text-decoration:underline;font-weight:500;padding:5px 20px;z-index:10;">
+								<?php esc_html_e('Learn more', 'wp-org-portfolio-block-wp'); ?>
+							</button>
+						</div>
+					</div>
+				<?php endforeach; } else {
+					echo '<div>' . esc_html__( 'No themes found.', 'wp-org-portfolio-block-wp' ) . '</div>';
+				} ?>
+			</div>
+			<?php if ($loaded_count < count($themes)) : ?>
+				<button class="was-load-more-btn" data-jsattr="themes" style="margin:0 auto 8px auto;display:block;padding:5px 20px;font-size:1em;border-radius:4px;background:#f3f3f6;border:1px solid #bbb;color:#222;cursor:pointer;">
+					<?php esc_html_e('Load more', 'wp-org-portfolio-block-wp'); ?>
+				</button>
+			<?php endif; ?>
+		</div>
+		<?php endif; ?>
+	</div>
+	<?php
+	return ob_get_clean();
+}
+}
+]]></content>
+  </file>
+  <file name="package.json">
+    <description>The AI assistant should only edit 'user_provided_block_name_slug', 'description' and resolve 'isDynamicVariant' in this file and ALWAYS INCLUDE IT. This file includes the necessary scripts for building, formatting, and linting the block code. Dependencies are managed at the workspace level via pnpm.</description>
+    <content><![CDATA[{
+    "name": "wp-org-portfolio",
+    "version": "0.1.0",
+    "description": "Showcase any WordPress.org developer's complete portfolio of plugins and themes with live data, interactive filtering, and lightning-fast caching.",
+    "author": "w0 block authoring tool",
+    "license": "GPL-2.0-or-later",
+    "main": "build/index.js",
+    "scripts": {
+        "build": "wp-scripts build --webpack-copy-php",
+        "format": "wp-scripts format",
+        "lint:css": "wp-scripts lint-style",
+        "lint:js": "wp-scripts lint-js",
+        "packages-update": "wp-scripts packages-update",
+        "plugin-zip": "wp-scripts plugin-zip",
+        "start": "wp-scripts start --blocks-manifest"
+    }
+}]]></content>
+  </file>
+</artefact>
