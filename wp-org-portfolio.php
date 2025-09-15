@@ -2,9 +2,13 @@
 /**
  * Plugin Name:       WP.org Portfolio
  * Description:       Display all plugins and themes from a WordPress.org username
- * Version:           0.1.0
- * Author:            Your Name
- * License:           GPL-2.0-or-later
+ * Version:           1.0.0
+ * Requires at least: 6.0
+ * Requires PHP:      7.4
+ * Author:      	  iconick
+ * Author URI:        https://iconick.io
+ * License:           GPLv2 or later
+ * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       wp-org-portfolio
  */
 
